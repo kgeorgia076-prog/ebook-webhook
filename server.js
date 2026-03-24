@@ -1,4 +1,11 @@
 require('dotenv').config();
+
+// DEBUG: Check environment variables are loading
+console.log('🔍 Environment check:');
+console.log('  GMAIL_USER:', process.env.GMAIL_USER ? '✅ Set to ' + process.env.GMAIL_USER : '❌ Missing');
+console.log('  WEBHOOK_SECRET:', process.env.WEBHOOK_SECRET ? '✅ Set' : '❌ Missing');
+console.log('  EBOOK_PATH:', process.env.EBOOK_PATH ? '✅ Set' : '❌ Missing');
+
 const express = require('express');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
@@ -20,17 +27,28 @@ app.use(
 
 // ─── Email transporter ────────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // Use STARTTLS (not SSL)
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD,
   },
+  tls: {
+    // Do not fail on invalid certs
+    rejectUnauthorized: false
+  }
 });
 
-// Verify SMTP connection on startup
+// Verify SMTP connection on startup with better error logging
 transporter.verify((err) => {
-  if (err) console.error('❌ SMTP connection failed:', err.message);
-  else console.log('✅ SMTP ready');
+  if (err) {
+    console.error('❌ SMTP connection failed:', err.message);
+    console.error('📧 GMAIL_USER:', process.env.GMAIL_USER ? 'Set' : 'Missing');
+    console.error('🔑 GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? 'Set' : 'Missing');
+  } else {
+    console.log('✅ SMTP ready');
+  }
 });
 
 // ─── Signature verification helper ───────────────────────────────────────────
