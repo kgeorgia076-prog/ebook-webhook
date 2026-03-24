@@ -140,12 +140,12 @@ app.post('/webhook', async (req, res) => {
             <p>Payment ID: <code>${paymentId}</code></p>
             <p>Enjoy the read! 📚</p>
           `,
-          attachments: [
-            {
-              filename: process.env.EBOOK_FILENAME,
-              path: process.env.EBOOK_PATH,
-            },
-          ],
+         attachments: [
+          {
+            filename: process.env.EBOOK_FILENAME,
+            path: process.env.EBOOK_PATH,
+          },
+        ],
         });
         
         console.log(`✅ Customer email sent to: ${customerEmail}`);
