@@ -4,9 +4,10 @@ console.log('🔍 Environment check:');
 console.log('  GMAIL_USER:', process.env.GMAIL_USER ? '✅ Set to ' + process.env.GMAIL_USER : '❌ Missing');
 console.log('  WEBHOOK_SECRET:', process.env.WEBHOOK_SECRET ? '✅ Set' : '❌ Missing');
 console.log('  EBOOK_PATH:', process.env.EBOOK_PATH ? '✅ Set' : '❌ Missing');
-console.log('  RESEND_API_KEY:', process.env.RESEND_API_KEY ? '✅ Set' : '❌ Missing');
+console.log('  GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? '✅ Set' : '❌ Missing');
 
 const express = require('express');
+const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const https = require('https');
 
@@ -25,72 +26,37 @@ app.use(
   })
 );
 
-// ─── Send email via Resend API ────────────────────────────────────────────────
-async function sendEmail({ to, subject, html, attachmentUrl, attachmentFilename }) {
-  return new Promise(async (resolve, reject) => {
+// ─── Email transporter — Gmail port 465 (SSL, works on Render) ───────────────
+const transporter = nodemailer.createTransport({
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+});
 
-    // Fetch the PDF from Google Drive and convert to base64
-    let attachmentBase64 = null;
-    if (attachmentUrl) {
-      attachmentBase64 = await new Promise((res, rej) => {
-        https.get(attachmentUrl, (response) => {
-          // Handle Google Drive redirect
-          if (response.statusCode === 302 || response.statusCode === 301) {
-            https.get(response.headers.location, (redirected) => {
-              const chunks = [];
-              redirected.on('data', chunk => chunks.push(chunk));
-              redirected.on('end', () => res(Buffer.concat(chunks).toString('base64')));
-              redirected.on('error', rej);
-            });
-          } else {
-            const chunks = [];
-            response.on('data', chunk => chunks.push(chunk));
-            response.on('end', () => res(Buffer.concat(chunks).toString('base64')));
-            response.on('error', rej);
-          }
-        }).on('error', rej);
-      });
-    }
+transporter.verify((err) => {
+  if (err) {
+    console.error('❌ SMTP connection failed:', err.message);
+  } else {
+    console.log('✅ SMTP ready');
+  }
+});
 
-    const payload = JSON.stringify({
-      from: `${process.env.STORE_NAME} <onboarding@resend.dev>`,
-      to: [to],
-      subject,
-      html,
-      ...(attachmentBase64 && {
-        attachments: [{
-          filename: attachmentFilename,
-          content: attachmentBase64,
-        }]
-      })
-    });
-
-    const options = {
-      hostname: 'api.resend.com',
-      path: '/emails',
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(payload),
-      },
-    };
-
-    const apiReq = https.request(options, (apiRes) => {
-      let data = '';
-      apiRes.on('data', chunk => data += chunk);
-      apiRes.on('end', () => {
-        if (apiRes.statusCode >= 200 && apiRes.statusCode < 300) {
-          resolve(JSON.parse(data));
-        } else {
-          reject(new Error(`Resend API error ${apiRes.statusCode}: ${data}`));
-        }
-      });
-    });
-
-    apiReq.on('error', reject);
-    apiReq.write(payload);
-    apiReq.end();
+// ─── Fetch PDF from URL and return as buffer ──────────────────────────────────
+function fetchPDF(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (response) => {
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        return fetchPDF(response.headers.location).then(resolve).catch(reject);
+      }
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve(Buffer.concat(chunks)));
+      response.on('error', reject);
+    }).on('error', reject);
   });
 }
 
@@ -159,8 +125,14 @@ app.post('/webhook', async (req, res) => {
       processedOrders.add(paymentId);
 
       try {
+        // Fetch the PDF from Google Drive
+        console.log('📥 Fetching ebook PDF...');
+        const pdfBuffer = await fetchPDF(process.env.EBOOK_PATH);
+        console.log(`📄 PDF fetched — ${Math.round(pdfBuffer.length / 1024)}KB`);
+
         // 1. Send ebook to customer
-        await sendEmail({
+        await transporter.sendMail({
+          from: `"${process.env.STORE_NAME}" <${process.env.GMAIL_USER}>`,
           to: customerEmail,
           subject: `Your "${process.env.EBOOK_TITLE}" download is ready!`,
           html: `
@@ -169,14 +141,19 @@ app.post('/webhook', async (req, res) => {
             <p>Payment ID: <code>${paymentId}</code></p>
             <p>Enjoy the read! 📚</p>
           `,
-          attachmentUrl: process.env.EBOOK_PATH,
-          attachmentFilename: process.env.EBOOK_FILENAME,
+          attachments: [
+            {
+              filename: process.env.EBOOK_FILENAME,
+              content: pdfBuffer,
+            },
+          ],
         });
 
         console.log(`✅ Customer email sent to: ${customerEmail}`);
 
         // 2. Notify admin
-        await sendEmail({
+        await transporter.sendMail({
+          from: `"${process.env.STORE_NAME}" <${process.env.GMAIL_USER}>`,
           to: process.env.ADMIN_EMAIL,
           subject: `💰 NEW SALE: ${process.env.EBOOK_TITLE}`,
           html: `
