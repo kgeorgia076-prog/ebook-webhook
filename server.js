@@ -4,10 +4,9 @@ console.log('🔍 Environment check:');
 console.log('  GMAIL_USER:', process.env.GMAIL_USER ? '✅ Set to ' + process.env.GMAIL_USER : '❌ Missing');
 console.log('  WEBHOOK_SECRET:', process.env.WEBHOOK_SECRET ? '✅ Set' : '❌ Missing');
 console.log('  EBOOK_PATH:', process.env.EBOOK_PATH ? '✅ Set' : '❌ Missing');
-console.log('  GMAIL_APP_PASSWORD:', process.env.GMAIL_APP_PASSWORD ? '✅ Set' : '❌ Missing');
+console.log('  BREVO_API_KEY:', process.env.BREVO_API_KEY ? '✅ Set' : '❌ Missing');
 
 const express = require('express');
-const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const https = require('https');
 
@@ -26,26 +25,7 @@ app.use(
   })
 );
 
-// ─── Email transporter — Gmail port 465 (SSL, works on Render) ───────────────
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-});
-
-transporter.verify((err) => {
-  if (err) {
-    console.error('❌ SMTP connection failed:', err.message);
-  } else {
-    console.log('✅ SMTP ready');
-  }
-});
-
-// ─── Fetch PDF from URL and return as buffer ──────────────────────────────────
+// ─── Fetch PDF from URL (follows redirects) ───────────────────────────────────
 function fetchPDF(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (response) => {
@@ -57,6 +37,58 @@ function fetchPDF(url) {
       response.on('end', () => resolve(Buffer.concat(chunks)));
       response.on('error', reject);
     }).on('error', reject);
+  });
+}
+
+// ─── Send email via Brevo HTTP API ────────────────────────────────────────────
+function sendEmail({ to, subject, html, attachmentBuffer, attachmentFilename }) {
+  return new Promise((resolve, reject) => {
+    const body = {
+      sender: {
+        name: process.env.STORE_NAME,
+        email: process.env.GMAIL_USER,
+      },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+      ...(attachmentBuffer && {
+        attachment: [
+          {
+            name: attachmentFilename,
+            content: attachmentBuffer.toString('base64'),
+          },
+        ],
+      }),
+    };
+
+    const payload = JSON.stringify(body);
+
+    const options = {
+      hostname: 'api.brevo.com',
+      path: '/v3/smtp/email',
+      method: 'POST',
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+
+    const apiReq = https.request(options, (apiRes) => {
+      let data = '';
+      apiRes.on('data', chunk => (data += chunk));
+      apiRes.on('end', () => {
+        if (apiRes.statusCode >= 200 && apiRes.statusCode < 300) {
+          resolve(JSON.parse(data));
+        } else {
+          reject(new Error(`Brevo API error ${apiRes.statusCode}: ${data}`));
+        }
+      });
+    });
+
+    apiReq.on('error', reject);
+    apiReq.write(payload);
+    apiReq.end();
   });
 }
 
@@ -131,8 +163,7 @@ app.post('/webhook', async (req, res) => {
         console.log(`📄 PDF fetched — ${Math.round(pdfBuffer.length / 1024)}KB`);
 
         // 1. Send ebook to customer
-        await transporter.sendMail({
-          from: `"${process.env.STORE_NAME}" <${process.env.GMAIL_USER}>`,
+        await sendEmail({
           to: customerEmail,
           subject: `Your "${process.env.EBOOK_TITLE}" download is ready!`,
           html: `
@@ -141,19 +172,14 @@ app.post('/webhook', async (req, res) => {
             <p>Payment ID: <code>${paymentId}</code></p>
             <p>Enjoy the read! 📚</p>
           `,
-          attachments: [
-            {
-              filename: process.env.EBOOK_FILENAME,
-              content: pdfBuffer,
-            },
-          ],
+          attachmentBuffer: pdfBuffer,
+          attachmentFilename: process.env.EBOOK_FILENAME,
         });
 
         console.log(`✅ Customer email sent to: ${customerEmail}`);
 
         // 2. Notify admin
-        await transporter.sendMail({
-          from: `"${process.env.STORE_NAME}" <${process.env.GMAIL_USER}>`,
+        await sendEmail({
           to: process.env.ADMIN_EMAIL,
           subject: `💰 NEW SALE: ${process.env.EBOOK_TITLE}`,
           html: `
