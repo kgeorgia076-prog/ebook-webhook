@@ -3,12 +3,14 @@ require('dotenv').config();
 console.log('🔍 Environment check:');
 console.log('  GMAIL_USER:', process.env.GMAIL_USER ? '✅ Set to ' + process.env.GMAIL_USER : '❌ Missing');
 console.log('  WEBHOOK_SECRET:', process.env.WEBHOOK_SECRET ? '✅ Set' : '❌ Missing');
-console.log('  EBOOK_PATH:', process.env.EBOOK_PATH ? '✅ Set' : '❌ Missing');
+console.log('  EBOOK_PATH:', process.env.EBOOK_PATH ? '✅ Set to ' + process.env.EBOOK_PATH : '❌ Missing');
 console.log('  BREVO_API_KEY:', process.env.BREVO_API_KEY ? '✅ Set' : '❌ Missing');
 
 const express = require('express');
 const crypto = require('crypto');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -24,21 +26,6 @@ app.use(
     },
   })
 );
-
-// ─── Fetch PDF from URL (follows redirects) ───────────────────────────────────
-function fetchPDF(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, (response) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        return fetchPDF(response.headers.location).then(resolve).catch(reject);
-      }
-      const chunks = [];
-      response.on('data', chunk => chunks.push(chunk));
-      response.on('end', () => resolve(Buffer.concat(chunks)));
-      response.on('error', reject);
-    }).on('error', reject);
-  });
-}
 
 // ─── Send email via Brevo HTTP API ────────────────────────────────────────────
 function sendEmail({ to, subject, html, attachmentBuffer, attachmentFilename }) {
@@ -157,10 +144,16 @@ app.post('/webhook', async (req, res) => {
       processedOrders.add(paymentId);
 
       try {
-        // Fetch the PDF from Google Drive
-        console.log('📥 Fetching ebook PDF...');
-        const pdfBuffer = await fetchPDF(process.env.EBOOK_PATH);
-        console.log(`📄 PDF fetched — ${Math.round(pdfBuffer.length / 1024)}KB`);
+        // Read PDF from local file (it lives right next to server.js in the repo)
+        const ebookPath = path.resolve(__dirname, process.env.EBOOK_PATH);
+        console.log(`📥 Reading ebook from: ${ebookPath}`);
+
+        if (!fs.existsSync(ebookPath)) {
+          throw new Error(`PDF not found at path: ${ebookPath}`);
+        }
+
+        const pdfBuffer = fs.readFileSync(ebookPath);
+        console.log(`📄 PDF loaded — ${Math.round(pdfBuffer.length / 1024)}KB`);
 
         // 1. Send ebook to customer
         await sendEmail({
